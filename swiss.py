@@ -148,8 +148,69 @@ def port_scan(target, mode="all"):
         print("No open ports found.")
 
 
+# Use nmap to extract OS information of a target
+def os_info(target):
+    # Attempt to resolve hostname or MAC address to an IP address
+    res = resolve_target(target)
+    if not res["ip"]:
+        print("Unable to resolve host to an IP address.")
+        return
+    ip = res["ip"]
+
+    # If successful, use the IP address to get OS information
+    try:
+        nmap_output = subprocess.run(["nmap", "-O", "-Pn", ip], stdout=subprocess.PIPE, text=True).stdout
+        
+        # Extract lines with OS information
+        os_info_lines = []
+        for line in nmap_output.splitlines():
+            if any(keyword in line for keyword in ["OS details:", "Running:", "Aggressive OS guesses:", "OS CPE:", "MAC Address:"]):
+                os_info_lines.append(line.strip())
+                
+        if os_info_lines:
+            print(f"---------------------------------")
+            print("\n".join(os_info_lines))
+            print(f"---------------------------------")
+        else:
+            print("No OS information found.")
+    except FileNotFoundError:
+        print("nmap not found. Please install nmap to enable OS detection.")
+
+# Attempts to find shares on a target system
+# TODO: Clean up output
+def share_scan(target):
+    if "/" not in target:
+        res = resolve_target(target)
+        if not res["ip"]:
+            print("Unable to resolve host to an IP address.")
+            return
+        ip = res["ip"]
+    else:
+        ip = target
+    print(f"Scanning for Windows shares on {target} ({ip})...")
+    try:
+        # Use only Windows-specific scripts: nbstat and smb-enum-shares.
+        windows_output = subprocess.run(
+            ["nmap", "-p139,445", "--script", "nbstat,smb-enum-shares", ip],
+            stdout=subprocess.PIPE, text=True).stdout
+        # Capture share names from output (case-insensitive match for 'ShareName' or 'Share:')
+        share_names = re.findall(r"(?i)(?:ShareName|Share):\s*(\S+)", windows_output)
+        if share_names:
+            for share in set(share_names):
+                share_address = f"\\\\{ip}\\{share}"
+                print(f"Share Name   : {share}")
+                print(f"Share Address: {share_address}")
+                print("---------------------------------")
+        else:
+            print("No Windows shares found.")
+            print("Raw nmap output for debugging:")
+            print(windows_output)
+    except FileNotFoundError:
+        print("nmap not found. Please install nmap to enable share scanning.")
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Swiss Network Tool v1.0")
+    parser = argparse.ArgumentParser(description="Swiss Network Tool v1.0.1")
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # Subparser for listing subnet hosts
@@ -160,19 +221,22 @@ if __name__ == '__main__':
     port_parser.add_argument("target", help="Target hostname or IP")
     port_parser.add_argument("--mode", choices=["all", "common"], default="common", help="Scan mode: 'all' scans all ports, 'common' scans common ports. Defaults to common.")
     
-    # Subparser for hostinfo command
-    info_parser = subparsers.add_parser("hostinfo", help="Get OS, architecture, and public info of a host")
-    info_parser.add_argument("target", help="Target hostname or IP")
-    
     # Subparser for resolve command
-    resolve_parser = subparsers.add_parser("host", help="Resolve a target (IP, MAC, or hostname) to its corresponding values")
+    resolve_parser = subparsers.add_parser("resolve", help="Resolve a target (IP, MAC, or hostname) to its corresponding values")
     resolve_parser.add_argument("target", help="Input MAC address, IP address, or hostname")
+    
+    # New subparser for OS information command
+    osinfo_parser = subparsers.add_parser("os", help="Get OS information of a host (by IP, MAC, or hostname)")
+    osinfo_parser.add_argument("target", help="Input MAC address, IP address, or hostname")
+    
+    # New subparser for share scanning
+    smb_parser = subparsers.add_parser("shares", help="Scan for SMB shares on a host or network (CIDR accepted)")
+    smb_parser.add_argument("target", help="Input MAC address, IP address, hostname, or CIDR (e.g., 192.168.1.0/24)")
     
     args = parser.parse_args()
 
-    if args.command == "list":
-        scan_subnet()
-    elif args.command == "portscan":
-        port_scan(args.target, mode=args.mode)
-    elif args.command == "host":
-        scan_host(args.target)
+    if args.command == "list":          scan_subnet()
+    elif args.command == "portscan":    port_scan(args.target, mode=args.mode)
+    elif args.command == "resolve":     scan_host(args.target)
+    elif args.command == "os":          os_info(args.target)
+    elif args.command == "shares":      share_scan(args.target)
