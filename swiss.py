@@ -7,8 +7,8 @@ import re
 from tqdm import tqdm
 import argparse
 
-# Define common ports list
 COMMON_PORTS = [20, 21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
+
 
 def get_local_ip():
     hostname = socket.gethostname()
@@ -17,6 +17,7 @@ def get_local_ip():
         if not ip.startswith("127."):
             return ip
     return "127.0.0.1"
+
 
 # List all IP addresses and hostnames on the local subnet
 def scan_subnet():
@@ -27,19 +28,14 @@ def scan_subnet():
 
     # Ping sweep using ping command (may miss devices that drop ICMP)
     def ping_host(ip):
-        result = subprocess.run(["ping", "-n", "1", "-w", "1000", str(ip)],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-        if result.returncode == 0:
-            active_ips.append(str(ip))
+        result = subprocess.run(["ping", "-n", "1", "-w", "1000", str(ip)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0: active_ips.append(str(ip))
 
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        list(executor.map(ping_host, list(network.hosts())))
+    with ThreadPoolExecutor(max_workers=2000) as executor: list(executor.map(ping_host, list(network.hosts())))
 
-    # Fallback: use nmap ping scan to catch hosts that didn't respond to ICMP
     try:
-        nmap_output = subprocess.run(["nmap", "-sn", str(network)],
-                                     stdout=subprocess.PIPE, text=True).stdout
+        # Use nmap ping scan to catch hosts that didn't respond to ICMP
+        nmap_output = subprocess.run(["nmap", "-sn", str(network)], stdout=subprocess.PIPE, text=True).stdout
         # Updated regex to capture IP with or without hostname in parentheses
         nmap_ips = set(re.findall(r"Nmap scan report for (?:[^\(]+\()?(\d+\.\d+\.\d+\.\d+)\)?", nmap_output))
     except Exception:
@@ -65,12 +61,12 @@ def get_arp_table():
     arp_output = subprocess.run(["arp", "-a"], stdout=subprocess.PIPE, text=True).stdout
     return dict(re.findall(r"(\d+\.\d+\.\d+\.\d+)\s+((?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2})", arp_output))
 
-def is_ipv4(target):
-    return re.match(r"^\d+\.\d+\.\d+\.\d+$", target)
 
-def is_mac(target):
-    return re.match(r"^(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$", target)
+def is_ipv4(target): return re.match(r"^\d+\.\d+\.\d+\.\d+$", target)
+def is_mac(target): return re.match(r"^(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$", target)
 
+
+# Take in IP address, MAC address, or hostname and resolve to all three
 def resolve_target(target):
     arp_table = get_arp_table()
     result = {"ip": None, "mac": "Unknown", "hostname": "Unknown"}
@@ -102,6 +98,7 @@ def resolve_target(target):
         except Exception:
             result["hostname"] = target
     return result
+
 
 def scan_host(target):
     res = resolve_target(target)
@@ -150,35 +147,53 @@ def port_scan(target, mode="all"):
 
 # Use nmap to extract OS information of a target
 def os_info(target):
-    # Attempt to resolve hostname or MAC address to an IP address
     res = resolve_target(target)
     if not res["ip"]:
         print("Unable to resolve host to an IP address.")
         return
     ip = res["ip"]
-
-    # If successful, use the IP address to get OS information
     try:
-        nmap_output = subprocess.run(["nmap", "-O", "-Pn", ip], stdout=subprocess.PIPE, text=True).stdout
+        nmap_output = subprocess.run(["nmap", "-O", "-Pn", ip],
+                                     stdout=subprocess.PIPE, text=True).stdout
+        mac_info = None
+        os_cpe = None
+        aggressive_guesses = None
         
-        # Extract lines with OS information
-        os_info_lines = []
         for line in nmap_output.splitlines():
-            if any(keyword in line for keyword in ["OS details:", "Running:", "Aggressive OS guesses:", "OS CPE:", "MAC Address:"]):
-                os_info_lines.append(line.strip())
-                
-        if os_info_lines:
-            print(f"---------------------------------")
-            print("\n".join(os_info_lines))
-            print(f"---------------------------------")
-        else:
-            print("No OS information found.")
+            line = line.strip()
+            if line.startswith("MAC Address:"):
+                mac_info = line[len("MAC Address:"):].strip()
+            elif line.startswith("OS CPE:"):
+                cpe_line = line[len("OS CPE:"):].strip()
+                # Split using comma if present; otherwise, use regex for space-separated CPEs.
+                if ',' in cpe_line:
+                    cpe_entries = [cpe.strip() for cpe in cpe_line.split(",") if cpe.strip()]
+                else:
+                    cpe_entries = re.findall(r"(cpe:[^\s]+)", cpe_line)
+                os_cpe = cpe_entries if cpe_entries else None
+            elif line.startswith("Aggressive OS guesses:"):
+                aggressive_guesses = [guess.strip() for guess in line.split(":",1)[1].split(",")]
+        
+        print(f"---------------------------------")
+        if mac_info:
+            print(f"MAC Address: {mac_info}")
+        if os_cpe:
+            print("OS CPE:")
+            for cpe in os_cpe:
+                print(f"  - {cpe}")
+        if aggressive_guesses:
+            print("Aggressive OS Guesses:")
+            for guess in aggressive_guesses:
+                print(f"  - {guess}")
+        print(f"---------------------------------")
     except FileNotFoundError:
         print("nmap not found. Please install nmap to enable OS detection.")
 
-# Attempts to find shares on a target system
+
+# Scans a target for Windows shares using nmap. Returns a list of dictionaries containing share names and network addresses.
 # TODO: Clean up output
 def share_scan(target):
+    # If target is a network (CIDR), use it as is; otherwise, resolve to IP.
     if "/" not in target:
         res = resolve_target(target)
         if not res["ip"]:
@@ -189,22 +204,46 @@ def share_scan(target):
         ip = target
     print(f"Scanning for Windows shares on {target} ({ip})...")
     try:
-        # Use only Windows-specific scripts: nbstat and smb-enum-shares.
-        windows_output = subprocess.run(
+        nmap_output = subprocess.run(
             ["nmap", "-p139,445", "--script", "nbstat,smb-enum-shares", ip],
             stdout=subprocess.PIPE, text=True).stdout
-        # Capture share names from output (case-insensitive match for 'ShareName' or 'Share:')
-        share_names = re.findall(r"(?i)(?:ShareName|Share):\s*(\S+)", windows_output)
-        if share_names:
-            for share in set(share_names):
-                share_address = f"\\\\{ip}\\{share}"
-                print(f"Share Name   : {share}")
-                print(f"Share Address: {share_address}")
-                print("---------------------------------")
+
+        # Use a verbose, multi-line regex to capture share details
+        pattern = re.compile(r"""
+            \\{2}\S+\\(?P<share>\S+):\s*\n       # line with UNC share name
+            \s*\|.*?Type:\s*(?P<type>[^\n]+)\s*\n  # Type field
+            \s*\|.*?Comment:\s*(?P<comment>[^\n]+)\s*\n  # Comment field
+            \s*\|.*?Anonymous\s+access:\s*(?P<anon>[^\n]+)\s*\n  # Anonymous access field
+            \s*\|.*?Current\s+user\s+access:\s*(?P<current>[^\n]+)\s*\n
+            """, re.VERBOSE | re.MULTILINE)
+        
+        shares = []
+        for match in pattern.finditer(nmap_output):
+            share = {
+                "name": match.group("share").strip(),
+                "type": match.group("type").strip(),
+                "comment": match.group("comment").strip(),
+                "anonymous": match.group("anon").strip(),
+                "current": match.group("current").strip(),
+                "address": f"\\\\{ip}\\{match.group('share').strip()}"
+            }
+            shares.append(share)
+        
+        if shares:
+            print("Windows Shares Found:")
+            print("---------------------------------------------------")
+            for s in shares:
+                print(f"Share Name           : {s['name']}")
+                print(f"Share Address        : {s['address']}")
+                print(f"Type                 : {s['type']}")
+                print(f"Comment              : {s['comment']}")
+                print(f"Anonymous Access     : {s['anonymous']}")
+                print(f"Current User Access  : {s['current']}")
+                print("---------------------------------------------------")
         else:
             print("No Windows shares found.")
             print("Raw nmap output for debugging:")
-            print(windows_output)
+            print(nmap_output)
     except FileNotFoundError:
         print("nmap not found. Please install nmap to enable share scanning.")
 
