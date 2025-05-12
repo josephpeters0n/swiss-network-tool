@@ -1,1 +1,1 @@
-Welcome to the repository for the Swiss Network Tool, an all-in-one network assessment tool. This is a program I'm writing for practice purposes, with the objective of creating a utility for vulnerability assessment and network hardening.
+Welcome to the repository for the Swiss Network Tool, an all-in-one network assessment tool. This is a program I'm writing for practice purposes, with the objective of creating a utility for vulnerability assessment and network hardening. This is a very early version of the tool.
